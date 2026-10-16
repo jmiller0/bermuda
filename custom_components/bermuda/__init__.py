@@ -52,6 +52,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: BermudaConfigEntry) -> b
 
     await coordinator.async_cleanup_device_registry_connections()
 
+    # The first refresh returns early (no devices built) while the Bluetooth ID
+    # data is still loading, and the orphan cleanup below relies on that refresh.
+    await coordinator.async_wait_for_manufacturer_ids()
+
     try:
         await coordinator.async_refresh()
     except (ValueError, TypeError, AttributeError, KeyError) as ex:

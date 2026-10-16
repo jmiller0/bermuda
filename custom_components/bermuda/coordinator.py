@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
@@ -189,7 +190,7 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator[Any]):
         )
 
         self._waitingfor_load_manufacturer_ids = True
-        entry.async_create_background_task(
+        self._load_manufacturer_ids_task = entry.async_create_background_task(
             hass, self.async_load_manufacturer_ids(), "Load Bluetooth IDs", eager_start=True
         )
 
@@ -451,6 +452,23 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator[Any]):
         else:
             return (None, None)
         return (_name, _generic)
+
+    async def async_wait_for_manufacturer_ids(self, max_wait: float = 30.0) -> None:
+        """
+        Wait for the background Bluetooth ID load started in __init__.
+
+        While it runs, _async_update_data() returns early without building
+        self.devices. async_setup_entry() awaits this before the first refresh so
+        that refresh (and the orphan cleanup after it) sees real devices.
+        """
+        task = getattr(self, "_load_manufacturer_ids_task", None)
+        if task is None or task.done():
+            return
+        try:
+            async with asyncio.timeout(max_wait):
+                await asyncio.shield(task)
+        except TimeoutError:
+            _LOGGER.warning("Bluetooth ID data still loading after %.0fs, continuing setup", max_wait)
 
     async def async_load_manufacturer_ids(self):
         """Import yaml files containing manufacturer name mappings."""
@@ -744,6 +762,18 @@ class BermudaDataUpdateCoordinator(DataUpdateCoordinator[Any]):
         duplicate_count = 0
 
         if self.config_entry is None:
+            return
+
+        # Without a populated device list every entity looks orphaned. That is the
+        # case while the Bluetooth ID load is pending (_async_update_data returns
+        # early), and removing them fires entity registry "remove" events for every
+        # Bermuda entity, which e.g. Proximity turns into tracked_entity_removed repairs.
+        if self._waitingfor_load_manufacturer_ids or not self.devices:
+            _LOGGER.debug(
+                "Skipping orphaned entity cleanup: device list not populated yet (loading=%s, devices=%d)",
+                self._waitingfor_load_manufacturer_ids,
+                len(self.devices),
+            )
             return
 
         bermuda_entities = er.async_entries_for_config_entry(registry, self.config_entry.entry_id)
